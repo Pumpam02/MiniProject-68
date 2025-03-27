@@ -4,7 +4,6 @@
  * - ควบคุมรีเลย์ 2 ตัวผ่าน Blynk
  * - มีโหมดการทำงาน 3 โหมด: ควบคุมด้วยตนเอง, อัตโนมัติตามแสง, ตั้งเวลา
  * - การทำงานแบบอัตโนมัติตามแสงมีการดีเลย์ก่อนเปิด-ปิดไฟเพื่อลดการกระพริบ
- * - บันทึกการตั้งค่าลง EEPROM และโหลดขึ้นมาใช้เมื่อเริ่มต้น
  */
 
 //============================= การตั้งค่า Blynk =============================
@@ -19,7 +18,6 @@
 #include <BlynkSimpleEsp8266.h>
 #include <Wire.h>
 #include <RTClib.h>
-#include <EEPROM.h>
 
 //============================= การกำหนดขา GPIO =============================
 #define LDR_PIN A0      // ขา Analog สำหรับเซ็นเซอร์แสง LDR
@@ -68,37 +66,9 @@ bool led_timer_on_set[2] = {false, false};   // สถานะการใช�
 //============================= ตัวแปรสำหรับ LDR =============================
 int LDR_THRESHOLD = 600;  // ค่าขีดแบ่งแสง - มากกว่านี้ถือว่ามืด (ค่าเริ่มต้น)
 
-// ตัวแปรสำหรับเก็บค่าเฉลี่ย LDR เพื่อลดการกระพริบ
-#define LDR_SAMPLES 5    // จำนวนตัวอย่างในการหาค่าเฉลี่ย
-int ldrValues[LDR_SAMPLES];  // อาร์เรย์เก็บค่า LDR
-int ldrIndex = 0;            // ดัชนีปัจจุบันในอาร์เรย์
-
-//============================= ตัวแปรสำหรับ EEPROM =============================
-#define EEPROM_THRESHOLD_ADDR 0   // ตำแหน่งเก็บค่า LDR_THRESHOLD
-#define EEPROM_ON_DELAY_ADDR 4    // ตำแหน่งเก็บค่า LIGHT_ON_DELAY
-#define EEPROM_OFF_DELAY_ADDR 8   // ตำแหน่งเก็บค่า LIGHT_OFF_DELAY
-
 //============================= อ็อบเจกต์ต่างๆ =============================
 RTC_DS3231 rtc;      // นาฬิกา RTC
 BlynkTimer timer;    // Timer สำหรับ Blynk
-
-//============================= ฟังก์ชันคำนวณค่าเฉลี่ย LDR =============================
-int calculateLdrAverage() {
-  // อ่านค่า LDR ปัจจุบัน
-  int currentValue = analogRead(LDR_PIN);
-  
-  // เก็บค่าในอาร์เรย์
-  ldrValues[ldrIndex] = currentValue;
-  ldrIndex = (ldrIndex + 1) % LDR_SAMPLES;
-  
-  // คำนวณค่าเฉลี่ย
-  long sum = 0;
-  for (int i = 0; i < LDR_SAMPLES; i++) {
-    sum += ldrValues[i];
-  }
-  
-  return sum / LDR_SAMPLES;
-}
 
 //============================= ฟังก์ชันควบคุมรีเลย์ =============================
 // ฟังก์ชันควบคุมรีเลย์ 1
@@ -111,16 +81,7 @@ void toggleRelay1(bool newState) {
     // อัพเดตสถานะใน Blynk
     Blynk.virtualWrite(V8, relay1State);
     Blynk.virtualWrite(V0, relay1State);
-    
-    // อัพเดตสถานะสีเขียวเมื่อไฟติด สีแดงเมื่อไฟดับ
-    if (relay1State) {
-      Blynk.setProperty(V16, "color", "#00FF00");  // สีเขียว
-      Blynk.virtualWrite(V16, "ON");
-    } else {
-      Blynk.setProperty(V16, "color", "#FF0000");  // สีแดง
-      Blynk.virtualWrite(V16, "OFF");
-    }
-    
+
     Serial.print("Relay 1 State: ");
     Serial.println(relay1State ? "ON" : "OFF");
   }
@@ -136,15 +97,6 @@ void toggleRelay2(bool newState) {
     // อัพเดตสถานะใน Blynk
     Blynk.virtualWrite(V9, relay2State);
     Blynk.virtualWrite(V1, relay2State);
-    
-    // อัพเดตสถานะสีเขียวเมื่อไฟติด สีแดงเมื่อไฟดับ
-    if (relay2State) {
-      Blynk.setProperty(V17, "color", "#00FF00");  // สีเขียว
-      Blynk.virtualWrite(V17, "ON");
-    } else {
-      Blynk.setProperty(V17, "color", "#FF0000");  // สีแดง
-      Blynk.virtualWrite(V17, "OFF");
-    }
     
     Serial.print("Relay 2 State: ");
     Serial.println(relay2State ? "ON" : "OFF");
@@ -210,25 +162,25 @@ void manageTimerRelay() {
 
 // จัดการรีเลย์ตามแสง (Auto Light Mode)
 void controlRelayByLight() {
-  // ใช้ค่าเฉลี่ย LDR แทนค่าที่อ่านได้โดยตรง เพื่อลดการกระพริบ
-  int ldrAverage = calculateLdrAverage();
+  // อ่านค่าแสงโดยตรงจาก LDR
+  int ldrValue = analogRead(LDR_PIN);
   
   // ส่งค่าไปยัง Blynk เพื่อแสดงผล
-  Blynk.virtualWrite(V10, ldrAverage);
+  Blynk.virtualWrite(V10, ldrValue);
   
   unsigned long currentMillis = millis();
   
   //---------------------- ควบคุมรีเลย์ 1 โหมด AUTO_LIGHT ----------------------
   if (relay1Mode == AUTO_LIGHT) {
     //--- เมื่อแสงน้อยลง (มืด) - เริ่มนับเวลารอเปิดไฟ ---
-    if (ldrAverage > LDR_THRESHOLD && !waitingToTurnOn1 && !relay1State && !waitingToTurnOff1) {
+    if (ldrValue > LDR_THRESHOLD && !waitingToTurnOn1 && !relay1State && !waitingToTurnOff1) {
       lightOffTime1 = currentMillis;
       waitingToTurnOn1 = true;
       
       Serial.println("------------------------");
       Serial.println("Relay 1 Auto Light Mode");
       Serial.print("Light Level Low (");
-      Serial.print(ldrAverage);
+      Serial.print(ldrValue);
       Serial.print(" > ");
       Serial.print(LDR_THRESHOLD);
       Serial.print(") - Starting ");
@@ -239,21 +191,21 @@ void controlRelayByLight() {
     //--- ถ้ากำลังรอเปิดไฟ และครบเวลาแล้ว ---
     if (waitingToTurnOn1 && (currentMillis - lightOffTime1 >= LIGHT_ON_DELAY)) {
       // ตรวจสอบอีกครั้งว่ายังมืดอยู่ก่อนเปิดไฟจริง
-      if (ldrAverage > LDR_THRESHOLD) {
+      if (ldrValue > LDR_THRESHOLD) {
         toggleRelay1(true);
       }
       waitingToTurnOn1 = false;
     }
     
     //--- เมื่อแสงมากขึ้น (สว่าง) - เริ่มนับเวลารอปิดไฟ ---
-    if (ldrAverage <= LDR_THRESHOLD && !waitingToTurnOff1 && relay1State && !waitingToTurnOn1) {
+    if (ldrValue <= LDR_THRESHOLD && !waitingToTurnOff1 && relay1State && !waitingToTurnOn1) {
       lightOnTime1 = currentMillis;
       waitingToTurnOff1 = true;
       
       Serial.println("------------------------");
       Serial.println("Relay 1 Auto Light Mode");
       Serial.print("Light Level High (");
-      Serial.print(ldrAverage);
+      Serial.print(ldrValue);
       Serial.print(" <= ");
       Serial.print(LDR_THRESHOLD);
       Serial.print(") - Starting ");
@@ -264,7 +216,7 @@ void controlRelayByLight() {
     //--- ถ้ากำลังรอปิดไฟ และครบเวลาแล้ว ---
     if (waitingToTurnOff1 && (currentMillis - lightOnTime1 >= LIGHT_OFF_DELAY)) {
       // ตรวจสอบอีกครั้งว่ายังสว่างอยู่ก่อนปิดไฟจริง
-      if (ldrAverage <= LDR_THRESHOLD) {
+      if (ldrValue <= LDR_THRESHOLD) {
         toggleRelay1(false);
       }
       waitingToTurnOff1 = false;
@@ -272,7 +224,7 @@ void controlRelayByLight() {
     
     //--- ยกเลิกการรอในกรณีที่แสงเปลี่ยนกลับระหว่างรอ ---
     // ถ้าในระหว่างที่รอปิดไฟ แต่แสงกลับน้อยลงอีก (กลับมืด) ยกเลิกการรอ
-    if (waitingToTurnOff1 && ldrAverage > LDR_THRESHOLD) {
+    if (waitingToTurnOff1 && ldrValue > LDR_THRESHOLD) {
       waitingToTurnOff1 = false;
       
       Serial.println("------------------------");
@@ -281,7 +233,7 @@ void controlRelayByLight() {
     }
     
     // ถ้าในระหว่างที่รอเปิดไฟ แต่แสงกลับมากขึ้น (กลับสว่าง) ยกเลิกการรอ
-    if (waitingToTurnOn1 && ldrAverage <= LDR_THRESHOLD) {
+    if (waitingToTurnOn1 && ldrValue <= LDR_THRESHOLD) {
       waitingToTurnOn1 = false;
       
       Serial.println("------------------------");
@@ -293,14 +245,14 @@ void controlRelayByLight() {
   //---------------------- ควบคุมรีเลย์ 2 โหมด AUTO_LIGHT ----------------------
   if (relay2Mode == AUTO_LIGHT) {
     //--- เมื่อแสงน้อยลง (มืด) - เริ่มนับเวลารอเปิดไฟ ---
-    if (ldrAverage > LDR_THRESHOLD && !waitingToTurnOn2 && !relay2State && !waitingToTurnOff2) {
+    if (ldrValue > LDR_THRESHOLD && !waitingToTurnOn2 && !relay2State && !waitingToTurnOff2) {
       lightOffTime2 = currentMillis;
       waitingToTurnOn2 = true;
       
       Serial.println("------------------------");
       Serial.println("Relay 2 Auto Light Mode");
       Serial.print("Light Level Low (");
-      Serial.print(ldrAverage);
+      Serial.print(ldrValue);
       Serial.print(" > ");
       Serial.print(LDR_THRESHOLD);
       Serial.print(") - Starting ");
@@ -311,21 +263,21 @@ void controlRelayByLight() {
     //--- ถ้ากำลังรอเปิดไฟ และครบเวลาแล้ว ---
     if (waitingToTurnOn2 && (currentMillis - lightOffTime2 >= LIGHT_ON_DELAY)) {
       // ตรวจสอบอีกครั้งว่ายังมืดอยู่ก่อนเปิดไฟจริง
-      if (ldrAverage > LDR_THRESHOLD) {
+      if (ldrValue > LDR_THRESHOLD) {
         toggleRelay2(true);
       }
       waitingToTurnOn2 = false;
     }
     
     //--- เมื่อแสงมากขึ้น (สว่าง) - เริ่มนับเวลารอปิดไฟ ---
-    if (ldrAverage <= LDR_THRESHOLD && !waitingToTurnOff2 && relay2State && !waitingToTurnOn2) {
+    if (ldrValue <= LDR_THRESHOLD && !waitingToTurnOff2 && relay2State && !waitingToTurnOn2) {
       lightOnTime2 = currentMillis;
       waitingToTurnOff2 = true;
       
       Serial.println("------------------------");
       Serial.println("Relay 2 Auto Light Mode");
       Serial.print("Light Level High (");
-      Serial.print(ldrAverage);
+      Serial.print(ldrValue);
       Serial.print(" <= ");
       Serial.print(LDR_THRESHOLD);
       Serial.print(") - Starting ");
@@ -336,7 +288,7 @@ void controlRelayByLight() {
     //--- ถ้ากำลังรอปิดไฟ และครบเวลาแล้ว ---
     if (waitingToTurnOff2 && (currentMillis - lightOnTime2 >= LIGHT_OFF_DELAY)) {
       // ตรวจสอบอีกครั้งว่ายังสว่างอยู่ก่อนปิดไฟจริง
-      if (ldrAverage <= LDR_THRESHOLD) {
+      if (ldrValue <= LDR_THRESHOLD) {
         toggleRelay2(false);
       }
       waitingToTurnOff2 = false;
@@ -344,7 +296,7 @@ void controlRelayByLight() {
     
     //--- ยกเลิกการรอในกรณีที่แสงเปลี่ยนกลับระหว่างรอ ---
     // ถ้าในระหว่างที่รอปิดไฟ แต่แสงกลับน้อยลงอีก (กลับมืด) ยกเลิกการรอ
-    if (waitingToTurnOff2 && ldrAverage > LDR_THRESHOLD) {
+    if (waitingToTurnOff2 && ldrValue > LDR_THRESHOLD) {
       waitingToTurnOff2 = false;
       
       Serial.println("------------------------");
@@ -353,7 +305,7 @@ void controlRelayByLight() {
     }
     
     // ถ้าในระหว่างที่รอเปิดไฟ แต่แสงกลับมากขึ้น (กลับสว่าง) ยกเลิกการรอ
-    if (waitingToTurnOn2 && ldrAverage <= LDR_THRESHOLD) {
+    if (waitingToTurnOn2 && ldrValue <= LDR_THRESHOLD) {
       waitingToTurnOn2 = false;
       
       Serial.println("------------------------");
@@ -377,12 +329,7 @@ void checkTime() {
 //============================= การจัดการวิดเจ็ต Blynk =============================
 // วิดเจ็ตปรับค่า LDR threshold (V11)
 BLYNK_WRITE(V11) {
-  int newThreshold = param.asInt();
-  LDR_THRESHOLD = newThreshold;
-  
-  // บันทึกค่าลง EEPROM
-  EEPROM.put(EEPROM_THRESHOLD_ADDR, LDR_THRESHOLD);
-  EEPROM.commit();
+  LDR_THRESHOLD = param.asInt();
   
   Serial.println("------------------------");
   Serial.print("LDR Threshold changed to: ");
@@ -393,10 +340,6 @@ BLYNK_WRITE(V11) {
 BLYNK_WRITE(V12) {
   LIGHT_ON_DELAY = param.asInt() * 1000;  // แปลงเป็นมิลลิวินาทีจากวินาที
   
-  // บันทึกค่าลง EEPROM
-  EEPROM.put(EEPROM_ON_DELAY_ADDR, LIGHT_ON_DELAY);
-  EEPROM.commit();
-  
   Serial.println("------------------------");
   Serial.print("Light ON delay changed to: ");
   Serial.print(LIGHT_ON_DELAY / 1000);
@@ -406,10 +349,6 @@ BLYNK_WRITE(V12) {
 // วิดเจ็ตสำหรับดีเลย์ปิดไฟ (V13)
 BLYNK_WRITE(V13) {
   LIGHT_OFF_DELAY = param.asInt() * 1000;  // แปลงเป็นมิลลิวินาทีจากวินาที
-  
-  // บันทึกค่าลง EEPROM
-  EEPROM.put(EEPROM_OFF_DELAY_ADDR, LIGHT_OFF_DELAY);
-  EEPROM.commit();
   
   Serial.println("------------------------");
   Serial.print("Light OFF delay changed to: ");
@@ -632,9 +571,6 @@ void setup() {
   Serial.println("เริ่มต้นระบบควบคุมไฟอัตโนมัติ");
   Serial.println("========================");
   
-  // เริ่มต้น EEPROM
-  EEPROM.begin(512);
-  
   // เริ่มต้นการสื่อสาร I2C
   Wire.begin(D2, D1);  // SDA, SCL
   
@@ -650,27 +586,9 @@ void setup() {
     // ตั้งเวลาเป็นเวลาคอมไพล์
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
-
-  // อ่านค่าจาก EEPROM
-  EEPROM.get(EEPROM_THRESHOLD_ADDR, LDR_THRESHOLD);
-  EEPROM.get(EEPROM_ON_DELAY_ADDR, LIGHT_ON_DELAY);
-  EEPROM.get(EEPROM_OFF_DELAY_ADDR, LIGHT_OFF_DELAY);
-  
-  // ตรวจสอบค่าที่อ่านได้ ถ้าไม่ถูกต้องให้ใช้ค่าเริ่มต้น
-  if (isnan(LDR_THRESHOLD) || LDR_THRESHOLD < 0 || LDR_THRESHOLD > 1023) {
-    LDR_THRESHOLD = 600;
-  }
-  
-  if (isnan(LIGHT_ON_DELAY) || LIGHT_ON_DELAY < 0 || LIGHT_ON_DELAY > 300000) {
-    LIGHT_ON_DELAY = 10000;
-  }
-  
-  if (isnan(LIGHT_OFF_DELAY) || LIGHT_OFF_DELAY < 0 || LIGHT_OFF_DELAY > 300000) {
-    LIGHT_OFF_DELAY = 5000;
-  }
   
   Serial.println("------------------------");
-  Serial.print("โหลดค่า LDR Threshold: ");
+  Serial.print("ค่า LDR Threshold: ");
   Serial.println(LDR_THRESHOLD);
   Serial.print("ดีเลย์เปิดไฟ: ");
   Serial.print(LIGHT_ON_DELAY / 1000);
@@ -705,11 +623,6 @@ void setup() {
   Serial.println("กำลังเชื่อมต่อกับ Blynk...");
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, password);
   Serial.println("เชื่อมต่อกับ Blynk สำเร็จ");
-
-  // เริ่มต้นค่า LDR array
-  for (int i = 0; i < LDR_SAMPLES; i++) {
-    ldrValues[i] = analogRead(LDR_PIN);
-  }
 
   // ตั้งค่า BlynkTimer
   timer.setInterval(10000L, checkTime);
@@ -754,24 +667,10 @@ BLYNK_CONNECTED() {
   Blynk.virtualWrite(V1, relay2State);
   Blynk.virtualWrite(V8, relay1State);
   Blynk.virtualWrite(V9, relay2State);
-  Blynk.virtualWrite(V10, calculateLdrAverage());
+  Blynk.virtualWrite(V10, analogRead(LDR_PIN));
   Blynk.virtualWrite(V11, LDR_THRESHOLD);
   Blynk.virtualWrite(V12, LIGHT_ON_DELAY / 1000);
   Blynk.virtualWrite(V13, LIGHT_OFF_DELAY / 1000);
-  
- 
-  // อัพเดตโหมดการทำงาน
-  switch(relay1Mode) {
-    case MANUAL: Blynk.virtualWrite(V18, "MANUAL"); break;
-    case AUTO_LIGHT: Blynk.virtualWrite(V18, "AUTO LIGHT"); break;
-    case TIMER: Blynk.virtualWrite(V18, "TIMER"); break;
-  }
-  
-  switch(relay2Mode) {
-    case MANUAL: Blynk.virtualWrite(V19, "MANUAL"); break;
-    case AUTO_LIGHT: Blynk.virtualWrite(V19, "AUTO LIGHT"); break;
-    case TIMER: Blynk.virtualWrite(V19, "TIMER"); break;
-  }
   
   Serial.println("อัพเดตข้อมูลไปยัง Blynk เรียบร้อย");
 }
